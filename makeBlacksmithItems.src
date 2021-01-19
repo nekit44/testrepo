@@ -1,0 +1,596 @@
+use cfgfile;
+use util;
+use uo;
+
+include "global/attributes";
+include "skills/craft";
+include "specitems/magiciron";
+include ":carpitems:carpitems";
+include ":skillbooks:exskills";
+
+var itemcfg   := ReadConfigFile(":combat:itemdesc");
+var smith_cfg := ReadConfigFile(":blacksmithy:blacksmithy");
+gfref.x := 50;
+gfref.y := 50;
+var O := 501;
+
+program use_hammer(who, hammer)
+	if(!can_access(who, hammer))
+		return;
+	endif
+	if(!hammer.movable)
+		UCCommon(who, UCC_CANTUSE);
+		return;
+	endif
+	if(!ReserveItem(hammer))
+		UCCommon(who, UCC_CANTUSE);
+		return;
+	endif
+
+	if(!equiptool(who, hammer))
+		SendSysMessage(who, "Молоток необходимо взять в руки");
+		return;
+	endif
+
+	var the_objtype, amt;
+	
+	var menuretval := MenuGump( who, "Blacksmith Selection Menu", SKILLID_BLACKSMITHY, "#SmithAmt", "LastBlacksmithItem");
+
+	if(menuretval == "repair")
+		repair_this(who);
+		return;
+	endif
+
+	if (menuretval[1])
+		if(cint(menuretval[1]) == 0x71fe)
+			makerepaircontracts(who, cint(menuretval[2]));
+		else
+			makeblacksmithitems(who, CInt(menuretval[1]), CInt(menuretval[2]), hammer);
+		endif
+	endif
+endprogram
+
+function MenuGetSkill(objtype)
+	return Cint(smith_cfg[objtype]."skill");
+endfunction
+
+function repair_this(who)
+	SendSysMessage(who, "Что вы желаете починить?");
+	var use_on := Target(who);
+	if(!can_access(who, use_on))
+		return;
+	endif
+	if(use_on.movable == 0)
+		SendSysMessage(who, "Вы не можете взять эту вещь");
+		return;
+	endif
+	if(!Accessible(who, use_on))
+		UCCommon(who, UCC_CANTUSE);
+		return;
+	elseif(dist(who, use_on) > 2)
+		SendSysMessage(who, "Это слишком далеко");
+		return;
+	endif
+
+
+	if(is_weapon_armor(use_on.objtype))
+		var near_items := ListItemsNearLocation(who.x, who.y, who.z,1);
+		foreach item in (near_items)
+			if ((item.objtype == UOBJ_ANVIL1) || (item.objtype == UOBJ_ANVIL2))
+				repair_item(who, use_on, item);
+				return;
+			endif
+		endforeach
+		SendSysMessage( who, "Вы можете чинить вещи только стоя рядом с наковальней" );
+		return;
+	else
+		SendSysMessage(who, "Эта вещь не может быть починена кузнечным молотом");
+	endif
+	return;
+endfunction
+
+function is_weapon_armor(what)
+	var elem := FindConfigElem(itemcfg, what);
+	var repairable := GetConfigInt(elem,"repairable");
+	if (repairable == 1)
+		return 1;
+	else
+		return 0;
+	endif
+endfunction
+
+function makeblacksmithitems(who, what, amt, hammer)
+	var anvil_near := 0;
+	var av;
+	foreach item in ListItemsNearLocation(who.x, who.y, who.z, 1)
+		if((item.objtype == 0x0faf) || (item.objtype == 0x0fb0))
+			TurnPCTowardLocation(who, item.x, item.y);
+			anvil_near := 1;
+			av := item;
+			break;
+		endif
+	endforeach
+	if(anvil_near == 0)
+		SendSysMessage(who, "Вы должны находится рядом с наковальней чтобы ковать вещи");
+		return;
+	endif
+	SendSysMessage(who, "Из каких слитков вы хотите ковать?");
+	var use_on := Target(who);
+	if(!can_access(who, use_on))
+		return;
+	endif
+	if(!Accessible(who, use_on) || (Distance(who, use_on) > 2))
+		UCCommon(who, UCC_CANTUSE);
+		return;
+	endif
+
+	do_damage_carp(av, 20, RandomInt(3)); 
+
+	var is_ingot := 0;
+	var ptmod := 0, metallvl := 0;
+
+	case(use_on.objtype)
+		0x6309: is_ingot := 1; ptmod := 0;   
+		0x630a: is_ingot := 1; ptmod := 20;  metallvl := 1;
+		0x630b: is_ingot := 1; ptmod := 20;  metallvl := 2; 
+		0x630c: is_ingot := 1; ptmod := 50;  metallvl := 3; 
+		0x630d: is_ingot := 1; ptmod := 50;  metallvl := 4; 
+		0x630e: is_ingot := 1; ptmod := 75;  metallvl := 5; 
+		0x630f: is_ingot := 1; ptmod := 75;  metallvl := 6; 
+		0x6310: is_ingot := 1; ptmod := 100; metallvl := 7;
+		0x6311: is_ingot := 1; ptmod := 125; metallvl := 8;		
+	endcase
+	if(is_ingot == 0)
+		SendSysMessage(who, "Это не слитки");
+		return;
+	endif
+	if(use_on.movable == 0)
+		UCCommon(who, UCC_CANTUSE);
+		return;
+	endif
+	if(!checkskillfordifferentmetals(who, use_on))
+		SendSysMessage(who, "Ваш навык еще не позволяет вам работать с этим металлом");
+		return;
+	endif
+	if(!Accessible(who, use_on))
+		UCCommon(who, UCC_CANTUSE);
+		return;
+	endif
+	if(!ReserveItem(use_on))
+		SendSysMessage(who, "Слитки уже используются");
+		return;
+	endif
+	if(!what)
+		UCCommon(who, UCC_CANCELLED);
+		return;
+	endif
+
+	var cont := use_on.container;
+	if(!cont) cont := who.backpack; endif
+
+	var maxhp    := Cint(smith_cfg[what].maxhp);
+	var itemname := lower(smith_cfg[what].name);
+	var material := Cint(smith_cfg[what].material);
+	var skill    := Cint(smith_cfg[what].skill);
+	var points   := Cint(smith_cfg[what].points);
+	var colored   := Cint(smith_cfg[what].colored);
+	var name, tname, theitem;
+	var counter  := 0;
+	var x        := who.x;
+	var y        := who.y;
+	var myskill;
+	var exceptfrom := 90;
+
+	/*if(!colored && use_on.objtype != 0x6309)
+		SendSysMessage(who, "Эта вещь не может быть сделана из цветного металла");
+		return;
+	endif*/
+
+	while(counter < amt && hammer && !who.dead)
+		if((who.x != x) || (who.y != y))
+			SendSysMessage(who, "Вы прекращаете ковать");
+			return;
+		endif
+		if(GetAmount(use_on) >= material)
+			var ii;
+			for(ii:=1; ii<4; ii:=ii+1)
+				TurnPCTowardLocation(who, av.x, av.y);
+				PerformAction(who, 9);
+				sleepms(1200);
+				PlaySoundEffect(who, SFX_ANVIL);
+				sleepms(800);
+			endfor
+			
+			if(CheckSkill(who, SKILLID_BLACKSMITHY, skill, CInt(points + ptmod)))
+				IncreaseCounter(counter,1);
+				name := "";
+				theitem := CreateItemInContainer(cont, what, 1);
+				//theitem := CreateItemInBackpackEx(who, what, 1, "");
+				if(theitem)
+				CheckToolWear (who, hammer, SKILLID_BLACKSMITHY);
+				var material_type := use_on.objtype;
+				case(use_on.objtype)
+				0x6309:   name := ""             + itemname; exceptfrom := 80;
+				0x630a:   name := "dull copper " + itemname; exceptfrom := 82;
+				0x630b:   name := "shadow "      + itemname; exceptfrom := 84; 
+				0x630c:   name := "copper "      + itemname; exceptfrom := 86; 
+				0x630d:   name := "bronze "      + itemname; exceptfrom := 88; 
+				0x630e:   name := "golden "      + itemname; exceptfrom := 90; 
+				0x630f:   name := "agapite "     + itemname; exceptfrom := 91; 
+				0x6310:   name := "verite "      + itemname; exceptfrom := 92; 
+				0x6311:   name := "valorite "    + itemname; exceptfrom := 93;
+				
+				endcase
+
+				
+				theitem.color := use_on.color;				
+
+				if(!SubtractAmount(use_on, material))
+				DestroyItem(theitem);
+				SendSysMessage(who, "Вы прекращаете ковать.");
+				return;
+				endif
+
+				myskill := GetEffectiveSkill(who, SKILLID_BLACKSMITHY);
+
+				var fr := syncFreqRate(who, "BS", 100, 900);
+				var armslore := getEffectiveSkill(who, SKILLID_ARMSLORE);
+				var exchammer := 0;
+				if(GetObjProperty(hammer, "exceptional"))
+					exchammer := 10;
+				endif
+
+				var gz, house;
+
+				if(!who.multi)
+					house := 5;
+					if(!cint(getRegionString("gz",av.x,av.y,"Guarded")))
+						gz := 5;
+					endif
+				endif
+
+				var exceptchance := 25 + armslore/2 + fr*2/5 + exchammer + gz + house;
+				if(who.cmdlevel)
+					SendSysMessage(who, "exceptchance: "+exceptchance);
+				endif
+
+				if ( CheckSkill(who, SKILLID_BLACKSMITHY, 90, 0) && myskill>=exceptfrom && randomInt(1000) < exceptchance)
+				AwardPoints(who, SKILLID_ARMSLORE, skill);
+				SendSysMessage(who, "Вы создаете вещь исключительного качества");
+				SetObjProperty(theitem, "exceptional", 1);
+				start_script(":misc:highlight", {who, theitem});
+				PlayStationaryEffect(av.x, av.y, av.z, 0x3709, 0x0a, 0x1e );
+				tname := "Exceptional " + name;
+				if(myskill>=99 || ((myskill>=90) && CheckSkill(who, SKILLID_BLACKSMITHY, 105, 0)))
+				tname := tname + " [Crafted by " + who.name + "]";
+				Fame_Crafting(who, skill/40 +RandomInt(3));
+				adjust(who, theitem, metallvl, 1, 1);
+				else
+				Fame_Crafting(who, 1+RandomInt(4));
+				adjust(who, theitem, metallvl, 1, 0);
+				endif
+
+				else
+				SendSysMessage( who, "Вы создаете вещь и кладете себе в сумку" );
+				AwardPoints(who, SKILLID_ARMSLORE, skill/3+20);
+				
+				adjust(who, theitem, metallvl, 0, 0);				
+				tname := name;
+				endif
+				SetName(theitem, tname); 
+
+				if(!theitem.container)
+				SendSysMessage(who, "В вашей сумке больше нет места.");
+				return;
+				endif
+				else
+				SendSysMessage(who, "В вашей сумке больше нет места.");
+				SubtractAmount(use_on, material);
+				return;
+				endif
+			else
+				SubtractAmount(use_on, CInt(randomint(material+1)/2));
+				SendSysMessage(who, "Вы уничтожаете часть своего материала");
+				IncreaseCounter(counter,0);
+			endif
+		else
+			SendSysMessage(who, "У вас недостаточно слитков для продолжения ковки");
+			return;
+		endif
+	endwhile
+	SendSysMessage(who, "Вы закончили ковку");
+endfunction
+
+function checkskillfordifferentmetals(who, ingot)
+	case( ingot.objtype )
+		0x6309:   return(checkhisskill(who,  0));
+		0x630a:   return(checkhisskill(who, 65));
+		0x630b:   return(checkhisskill(who, 70));
+		0x630c:   return(checkhisskill(who, 75));
+		0x630d:   return(checkhisskill(who, 80));
+		0x630e:   return(checkhisskill(who, 85));
+		0x630f:   return(checkhisskill(who, 90));
+		0x6310:   return(checkhisskill(who, 95));
+		0x6311:   return(checkhisskill(who, 99));		
+		default:  SendSysMessage(who, "Эта вещь не куется");
+	endcase
+endfunction
+
+function checkhisskill(who, skill)
+	var his_skill := GetEffectiveSkill(who, SKILLID_BLACKSMITHY);
+	if(his_skill >= skill)
+		return 1;
+	else
+		return 0;
+	endif
+endfunction
+
+function repair_item(who, item, anvil)
+	var bsdiff := smith_cfg[item.objtype].skill;
+
+	if(bsdiff==error && item.objtype != 0xe85 && item.objtype != 0x1BC4)
+		SendSysMessage(who, "Это не может быть починено");
+		return;
+	endif
+	
+	var hp := item.hp;
+	var maxhp := item.maxhp;
+	
+	if(!hp || !maxhp)
+		SendSysMessage(who, "Это не может быть починено");
+		return;
+	endif
+
+	do_damage_carp(anvil, 20, RandomInt(3)); 
+
+	if(hp >= maxhp)
+		PrintTextAbovePrivate(item,"Предмет не поврежден", who);
+		return;
+	endif
+
+	var ii;
+	for(ii:=1; ii<4; ii:=ii+1)
+		TurnPCTowardLocation(who, anvil.x, anvil.y);
+		sleepms(1200);
+		if(item.isa(POLCLASS_WEAPON))
+			PlaySoundEffect(who, 0x57);
+			PerformAction(who, 33);
+		else
+			PlaySoundEffect(who, SFX_ANVIL);
+			PerformAction(who, 9);
+		endif
+		sleepms(800);
+	endfor
+
+	if(item.maxhp < 15)
+		if(randomInt(100) < (18-item.maxhp))
+			SendSysMessage(who, "Хрупкий металл ломается при орбаботке");
+			performAction(who, 31);
+			printTextAboveU(who, "*Ломает вещь*", 100);
+			destroyitem(item);
+			return;
+		endif
+	endif
+
+	var bs   := geteffectiveskill(who, SKILLID_BLACKSMITHY);
+	var magery   := geteffectiveskill(who, SKILLID_MAGERY);
+	var diff := cint(100 - (hp * 100 / cdbl(maxhp)));
+
+	var dmg3chance := 33, dmg2chance := 33;
+	if(diff>75)
+		dmg3chance := dmg3chance + (diff-75)/3;
+	elseif(diff>55)
+		dmg2chance := dmg2chance + (diff-55)/2;
+	endif
+
+	var dmg := 1;
+	if(randomInt(100) < dmg2chance) dmg := 2;
+	elseif(randomInt(100) < dmg3chance) dmg := 3;
+	endif
+
+	if(item.objtype == 0xe85) dmg := 8 + item.maxp/12 + randomInt(20); endif
+
+	if(bs <= 50) dmg := dmg + 2;
+	elseif(bs < 70) dmg := dmg + 1;
+	endif
+	if(is_magic_item(item)) 
+	if(cINT(magery) < 70)
+	SendSysMessage(who, "Ваш навык Magery слишком мал для работы с этой вещью");
+	return;
+	else
+	//dmg := dmg + 5 + randomInt(27 - bs/10 - magery/10);
+	dmg := dmg + 5 + randomInt(24 - bs/10 - magery/10);
+	endif
+	endif
+
+	if(item.maxhp-dmg < 1)
+		SendSysMessage(who, "Хрупкий металл ломается при обработке");
+			performAction(who, 31);
+			printTextAboveU(who, "*Ломает вещь*", 100);
+		destroyitem(item);
+		return;
+	else
+		item.maxhp_mod := item.maxhp_mod - dmg;
+	endif
+
+	diff := diff + getmetaldiffadj(item.color);
+	if(is_magic_item(item)) diff := diff + 12; endif
+
+	var pts := 0;
+	if(bs < 70) pts := diff/2; endif
+
+	if(diff < bsdiff*2/3)
+		diff := bsdiff * 2 / 3;
+	endif
+	
+	if(checkskillex(who,SKILLID_BLACKSMITHY, diff, pts, 30, 40, 1))
+		SendSysMessage(who, "Вещь была починена");
+		item.hp := item.maxhp;
+	else
+		SendSysMessage(who, "Вы не сумели починить вещь");
+	endif
+endfunction
+
+function makerepaircontracts(who, amt)
+	var anvil_near := 0;
+	var av;
+	foreach item in ListItemsNearLocation(who.x, who.y, who.z, 1)
+		if((item.objtype == 0x0faf) || (item.objtype == 0x0fb0))
+			TurnPCTowardLocation(who, item.x, item.y);
+			anvil_near := 1;
+			av := item;
+			break;
+		endif
+	endforeach
+	if(anvil_near == 0)
+		SendSysMessage(who, "Вы должны стоять рядом с наковальней");
+		return;
+	endif
+
+	SendSysMessage(who, "Укажите слитки которые вы хотите использовать");
+
+	var use_on := Target(who);
+	if(!can_access(who, use_on))
+		return;
+	endif
+	if(!Accessible(who, use_on) || (Distance(who, use_on) > 2))
+		UCCommon(who,UCC_CANTUSE);
+		return;
+	endif
+	var is_ingot := 0;
+
+	case(use_on.objtype)
+		0x6309: is_ingot := 1; 
+		0x630a: is_ingot := 1; 
+		0x630b: is_ingot := 1; 
+		0x630c: is_ingot := 1; 
+		0x630d: is_ingot := 1; 
+		0x630e: is_ingot := 1; 
+		0x630f: is_ingot := 1; 
+		0x6310: is_ingot := 1; 
+		0x6311: is_ingot := 1;
+		
+	endcase
+	if(is_ingot == 0)
+		SendSysMessage(who, "Это не слитки");
+		return;
+	endif
+	if(use_on.movable == 0 || !Accessible(who, use_on))
+		UCCommon(who,UCC_CANTUSE);
+		return;
+	endif
+	if(!ReserveItem(use_on))
+		SendSysMessage(who, "Слитки уже используются");
+		return;
+	endif
+
+	var skillneeded := 40 + getmetaldiffadj(use_on.color)*4;
+	if(use_on.objtype in {0x6312, 0x6313})
+		skillneeded := 80;
+	endif
+
+	if(geteffectiveskill(who,SKILLID_BLACKSMITHY) < skillneeded)
+		SendSysMessage(who, "Ваш навык не позволяет вам создавать контракты починки из этого металла");
+		return;
+	endif
+
+	var x1 := who.x;
+	var y1 := who.y;
+	var ingcolor := use_on.color;
+	var counter  := 0, contract;
+	var pts := skillneeded/2;
+	if(getEffectiveSkill(who, SKILLID_BLACKSMITHY) > 75) pts := 0; endif
+
+	while(counter<amt && !who.dead && (who.x==x1 && who.y==y1))
+		PerformAction(who,33);
+		sleepms(1500);
+
+		if(SubtractAmount(use_on, 1))
+			if(checkskillex(who,SKILLID_BLACKSMITHY, skillneeded+7, pts, 20, 40))
+				IncreaseCounter(counter,1);
+				set_critical(1);
+				contract := createiteminbackpackex(who, 0x71fe, 1, "контракт починки");
+				contract.color := ingcolor;
+				set_critical(0);
+				if(!contract.container) return; endif
+				sleep(2);
+			else
+				IncreaseCounter(counter,0);
+				SendSysMessage(who, "Вы не сумели создать контракт починки");
+				sleep(2);
+			endif
+		else
+			return;
+		endif
+	endwhile
+endfunction
+
+function getmetaldiffadj(type) //pass color, not type
+	case(type)
+		0x415: return 1;
+		0x454: return 2;
+		0x602: return 3;
+		0x45e: return 4;
+		0x8a6: return 5;
+		0x3ea: return 6;
+		0x84f: return 7;
+		0x528: return 8;
+	endcase
+	return 0;
+endfunction
+
+function adjust(who, item, metallvl, fExcept, fMakerMark)
+
+	var metal_qmod := metallvl * 0.05;
+
+	if(item.isa(POLCLASS_ARMOR))
+
+		if(fExcept)
+			if(fMakerMark)
+				item.ar_mod := item.ar_mod + 1;
+				metal_qmod := metal_qmod + 0.23;
+			else
+				metal_qmod := metal_qmod + 0.2;
+			endif
+		endif
+
+		item.quality := item.quality + metal_qmod;
+
+	elseif(item.isa(POLCLASS_WEAPON))
+	
+		var dmgmods := {0,1,1,2,2,3,4,5};
+
+		
+		if(metallvl)
+			item.dmg_mod := dmgmods[metallvl];
+			/*if(fExcept)
+				if(fMakerMark)
+					if (item.dmg_mod > 2)
+						item.dmg_mod := dmgmods[metallvl] + 1;
+					endif
+				endif
+			endif*/
+			item.dmg_mod := dmgmods[metallvl];
+			setobjproperty(item, "stability", metallvl);
+		endif
+
+		if(fExcept)
+			if(fMakerMark)
+				item.quality := item.quality + 0.14;
+			else
+				item.quality := item.quality + 0.1;
+			endif
+		endif
+
+	endif
+
+	var newmaxhp := item.maxhp;
+	/*if(item.isa(POLCLASS_WEAPON))
+		newmaxhp := cint(newmaxhp * (1+metal_qmod));
+	endif*/
+
+	newmaxhp := newmaxhp - randomInt(newmaxhp/5+1) + metallvl + getEffectiveSkill(who, SKILLID_BLACKSMITHY)/10;
+
+	item.maxhp_mod := newmaxhp - item.maxhp;
+	item.hp := item.maxhp;
+endfunction

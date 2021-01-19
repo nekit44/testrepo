@@ -1,0 +1,378 @@
+use cfgfile;
+use util;
+
+include "prefix";
+include "skills/craft";
+include "skills/healing";
+include ":skillbooks:exskills";
+
+const UOBJ_SEWING_KIT   := 0x0f9d;
+const UOBJ_BOLT_START   := 0x0f95;
+const UOBJ_BOLT_END     := 0x0f9c;
+const UOBJ_CLOTH_STARTS := 0x175d;
+const UOBJ_CLOTH_END    := 0x1768;
+const UOBJ_MUTLI_CLOTH  := 0x1766;
+const SCISSORS_SOUND    := 0x0249;
+
+var itemcfg          := ReadConfigFile( "itemdesc" );
+var tailor_cfg       := ReadConfigFile( "tailoring" );
+var leather_cfg      := ReadConfigFile( "leather" );
+
+var can_be_arcane := {0x9945,0x1515,0x1711,0x13c6};
+
+gfref.x := 50;
+gfref.y := 50;
+
+program use_sewing_kit(who, sewing_kit)
+	EraseObjProperty(who, "IsMeditating");
+	end_healing(who);
+	if(!can_access(who, sewing_kit))
+		return;
+	endif
+	if(sewing_kit.movable == 0)
+		UCCommon(who,UCC_CANTUSE);
+		return;
+	endif
+	if(!ReserveItem(sewing_kit))
+		UCCommon(who,UCC_CANTUSE);
+		return;
+	endif
+
+	var cont := sewing_kit.container;
+	if((!cont) || (cont.isa(POLCLASS_MOBILE)))
+		cont := who.backpack;
+	endif
+
+
+	var res := MenuGump(who, "Tailoring Menu", SKILLID_TAILORING, "#TailorAmt", "LastTailorItem");
+	if(!res[1]) return; endif
+
+	var f_cloth, f_leather, mname;
+
+	if(tailor_cfg[res[1]])
+		f_cloth := 1;
+		mname := {"ткань","ткань","ткани"};
+	elseif(leather_cfg[res[1]] || res[1]==0x71fc)
+		f_leather := 1;
+		mname := {"кожу","кожа","кожи"};
+	else
+		SendSysMessage(who, "Вы не знаете как это сделать");  
+		return;
+	endif
+
+	SendSysMessage(who, "Выберите " + mname[1] + " которую вы хотите использовать");  
+	var use_on := Target( who );
+	if (!use_on)
+		return;
+	endif
+	if(!can_access(who, use_on))
+		return;
+	endif
+	if(!ReserveItem(use_on))
+		return;
+	endif
+	if(!Accessible(who, use_on))
+		UCCommon(who,UCC_CANTUSE);
+		return;
+	endif
+	if(use_on.movable == 0)
+		UCCommon(who,UCC_CANTUSE);
+		return;
+	endif
+	var obj_type := use_on.objtype;
+	var f_ok := 0;
+
+	if(f_cloth)
+		if(((obj_type >= UOBJ_BOLT_START)  && (obj_type <= UOBJ_BOLT_END)))
+			var totalcloth := use_on.amount * 50;
+			if(DestroyItem(use_on))
+				use_on := CreateItemInBackpackEx(who, UOBJ_MUTLI_CLOTH, totalcloth,"", cont);
+				if(ReserveItem(use_on))
+					f_ok := 1;
+				endif
+			endif
+		elseif((obj_type >= UOBJ_CLOTH_STARTS) && (obj_type <= UOBJ_CLOTH_END))
+			f_ok := 1;
+		endif
+	
+	elseif(f_leather)
+		var cc := hides_to_leather(obj_type);
+		
+		if(cc)
+			var total := use_on.amount;
+			if(DestroyItem(use_on))
+				use_on := CreateItemInBackpackEx(who, cc, total, "", cont);
+				if(ReserveItem(use_on))
+					f_ok := 1;
+				endif  
+			endif
+		elseif(obj_type >=0xf130 && obj_type <= 0xf133)  
+			f_ok := 1;
+		endif  
+	endif
+
+	if(!f_ok)
+		SendSysMessage(who, "Это не " + mname[2]);
+		return;
+	endif  
+	
+	var type:= res[1];
+	var amt := res[2];
+	
+	var itemname, material, skill, leather_lvl := 0, color := 0, f_trophy, f_mask;
+	
+	if(f_leather)
+		material := leather_cfg[type]."material";
+		skill    := leather_cfg[type]."skill";
+		itemname := leather_cfg[type]."name";
+
+		f_trophy := leather_cfg[type]."trophy" == 1;
+		f_mask := leather_cfg[type]."mask" == 1;
+		
+		leather_lvl := 1;
+		var skill2 := 0;
+		if(use_on.objtype == 0xf131)
+			leather_lvl := 2;
+			skill2 := 65;
+		elseif(use_on.objtype == 0xf132)
+			leather_lvl := 3;
+			skill2 := 80;
+		elseif(use_on.objtype == 0xf133)
+			leather_lvl := 4;
+			skill2 := 99;
+		endif
+
+		if(type != 0x71fc)
+			if(leather_lvl > 1)
+				if(GetEffectiveSkill(who,SKILLID_TAILORING) < skill2)
+					SendSysMessage(who, "Ваш навык не позволяет вам работать с этой кожей");
+					return;
+				elseif(!CanUseExSkill(who,EXSKILL_LEATHERWORKING))
+					SendSysMessage(who, "Для работы с цветной кожей вы должны изучить умение Работа с кожей");
+					return;
+				else
+					color := use_on.color;
+				endif  
+			endif
+		else
+			color := use_on.color;
+			skill := skill + 10 * leather_lvl;
+		endif
+		
+	else
+		material := tailor_cfg[type]."material";
+		skill    := tailor_cfg[type]."skill";
+		itemname := tailor_cfg[type]."name";
+	endif  
+	
+	var counter := 0;
+	var x := who.x;
+	var y := who.y;
+	var theitem, tname;
+	
+	while(counter < amt && !who.dead && sewing_kit)
+		if((who.x != x) || (who.y != y))
+			break;
+		endif
+		
+		if(use_on && use_on.amount >= material)
+			if(f_trophy)
+				if(!get_trophy_head(who, type))
+					if(type == 0x91a7)
+						sendSysMessage(who, "У вас нет золотой рыбки");
+					else
+						sendSysMessage(who, "У вас нет головы этого существа");
+					endif
+					return;
+				endif
+			elseif(f_mask)
+				if(!get_mask_head(who, type))
+					sendSysMessage(who, "У вас нет головы этого существа");
+					return;
+				endif
+			endif
+
+			makenoise(who);
+			if(CheckSkill(who, SKILLID_TAILORING, cint(skill+leather_lvl), cint(skill*2+leather_lvl*50)))
+				IncreaseCounter(counter, 1);
+
+				if(f_trophy)
+					if(!subtractAmount(get_trophy_head(who, type), 1))
+						return; endif endif
+
+				if(f_mask)
+					if(!subtractAmount(get_mask_head(who, type), 1))
+						return; endif endif
+				
+				if(SubtractAmount(use_on, material))
+					set_critical(1);
+					theitem := CreateItemInBackpackEx(who, type, 1, "", cont);
+					CheckToolWear(who, sewing_kit, SKILLID_TAILORING);
+					theitem.color := color;
+					set_critical(0);
+					
+					if(!theitem)
+						SendSysMessage(who, "Error: cannot create item");
+						break;
+					endif
+
+					setobjproperty(theitem, "leatherlvl", leather_lvl);
+					tname := itemname;
+
+					
+					//new leather
+					case(leather_lvl)
+						2: theitem.ar_mod := 10; tname := "spined "+tname;
+						3: theitem.ar_mod := 12; tname := "horned "+tname;
+						4: theitem.ar_mod := 15; tname := "barbed "+tname;
+					endcase
+
+					if(theitem.objtype != 0x71fc) 
+					
+					var myskill  := GetEffectiveSkill(who,SKILLID_TAILORING);
+					var exchance := (100 - skill) * myskill/cdbl(100);
+					
+					if(myskill < skill)
+						exchance := exchance/10;
+					endif
+					
+					if(exchance > 55 - skill/2)
+						exchance := 55 - skill/2;
+					endif  
+					
+					if(RandomInt(100) < exchance)
+						if(myskill >= 100 && f_cloth)
+							theitem.quality := 1.3;
+							tname := "an exceptional " + tname +  " [crafted by " + who.name + "]";
+							Fame_Crafting(who,1+RandomInt(skill/40+2));
+							
+						elseif(myskill >= 99 || ((myskill>=90) && (CheckSkill(who,SKILLID_TAILORING,105,0))))
+							theitem.quality := 1.2;
+							tname := "an exceptional " + tname +  " [crafted by " + who.name + "]";
+							Fame_Crafting(who,1+RandomInt(skill/40+2));
+							
+						else
+							theitem.quality := 1.15;
+							tname := "an exceptional " + tname;
+							Fame_Crafting(who,1+RandomInt(2));
+						endif
+						
+						if(type in can_be_arcane)
+							if(!tname["[crafted by"])
+								setobjproperty(theitem, "ArcaneMaker", who.name);
+							endif
+							setobjproperty(theitem, "ArcaneMaxCharges", 12+myskill/4);
+						endif
+						
+						theitem.ar_mod := theitem.ar_mod + 1;
+						SendSysMessage(who, "Вы сшили вещь исключительного качества");          
+						start_script(":misc:highlight", {who, theitem});
+					else
+						//below avrg. quality
+						var sk2 := skill/2; //bad quality chance
+						var md := myskill-skill;
+						if(md>20) md := 20; elseif(md<-20) md := -20; endif
+						sk2 := sk2 * (1.5 - (md+20)/cdbl(40));
+						if(sk2<5) sk2 := 5; elseif(sk2>80) sk2:=80; endif
+
+						if(randomint(100) < sk2)
+							SendSysMessage( who, "Вы сшили вещь но ее качество ниже среднего" );
+							var rint := RandomInt(3) + 1;
+							case(rint)
+								1: theitem.quality := 0.7;
+								2: theitem.quality := 0.8;
+								3: theitem.quality := 0.9;
+							endcase
+						else
+							SendSysMessage( who, "Вы сшили вещь среднего качества" );
+							theitem.quality := 1.0;
+						endif          
+					endif
+					
+					endif // adj quality for items, except rep.contr.
+
+					SetName(theitem, tname);
+
+					theitem.hp := theitem.maxhp;
+
+					if(!theitem.container)
+						SendSysMessage(who, "Вы прекращаете шить");
+						return;
+					endif
+					
+				else
+					break;
+				endif  
+				
+			else
+				IncreaseCounter(counter, 0);
+				SendSysMessage(who, "Вам не удалось сшить вещи");
+				SubtractAmount(use_on, 1 + RandomInt(material));
+			endif
+			
+		else
+			SendSysMessage(who,"У вас недостаточно "+mname[3]+" для этого");
+			break;
+		endif
+	endwhile
+	SendSysMessage(who, "Вы прекращаете шить");
+endprogram
+
+
+
+function makenoise(who)
+	PlaySoundEffect(who, SCISSORS_SOUND);
+	sleep(1);
+	PlaySoundEffect(who, SCISSORS_SOUND);
+	sleep(1);
+	PlaySoundEffect(who, SCISSORS_SOUND);
+	sleep(1);
+	PlaySoundEffect(who, SCISSORS_SOUND);
+	sleep(1);
+endfunction
+
+function hides_to_leather(type)
+
+	case(type)
+		0x1078:
+		0x1079: return 0xf130;
+		
+		0x107a: return 0xf131;
+		0x107b: return 0xf132;
+		0x107c: return 0xf133;
+	endcase  
+	return 0;
+	
+endfunction
+
+function MenuGetSkill(objtype)
+	var s := tailor_cfg[objtype].skill;
+	if(s) return s;
+	else  return leather_cfg[objtype].skill;
+	endif
+endfunction
+
+function get_trophy_head(who, type)
+if(type == 0x91a7) return findObjtypeInContainer(who.backpack, 0xa370); endif
+
+foreach itm in enumerateItemsInContainer(who.backpack) 
+	if(itm.objtype == 0x91b0)
+		if(getobjproperty(itm, "fortrophy") == type)
+			return itm;
+		endif
+	endif
+endforeach
+return error;
+endfunction
+
+function get_mask_head(who, type)
+
+foreach itm in enumerateItemsInContainer(who.backpack) 
+	if(itm.objtype == 0x91b0)
+		if(getobjproperty(itm, "formask") == type)
+			return itm;
+		endif
+	endif
+endforeach
+return error;
+endfunction
